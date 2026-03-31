@@ -5,18 +5,23 @@ import { CodexAdapter } from './codex.js';
 import { GeminiAdapter } from './gemini.js';
 import { KimiAdapter } from './kimi.js';
 import { OpenCodeAdapter } from './opencode.js';
+import { WebAdapter } from './web.js';
+import type { MessageQueue } from '../web/message-queue.js';
 
 export class AdapterRegistry {
   private adapters = new Map<string, CLIAdapter>();
   private available = new Set<string>();
   private byDisplayName = new Map<string, string>(); // displayName → name
 
-  constructor() {
+  constructor(messageQueue?: MessageQueue) {
     this.register(new ClaudeAdapter());
     this.register(new CodexAdapter());
     this.register(new GeminiAdapter());
     this.register(new KimiAdapter());
     this.register(new OpenCodeAdapter());
+    if (messageQueue) {
+      this.register(new WebAdapter(messageQueue));
+    }
   }
 
   private register(adapter: CLIAdapter): void {

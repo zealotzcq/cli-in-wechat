@@ -23,16 +23,18 @@ export interface BridgeConfig {
   allowedUsers: string[];
   workDir: string;
   tools: Record<string, ToolConfig>;
+  webServerPort: number;
 }
 
 const DEFAULT_CONFIG: BridgeConfig = {
   defaultTool: 'claude',
   maxResponseChunkSize: 2000,
-  cliTimeout: 300_000,      // 5 minutes
-  typingInterval: 5_000,    // 5 seconds
-  allowedUsers: [],          // empty = allow all
+  cliTimeout: 300_000,
+  typingInterval: 5_000,
+  allowedUsers: [],
   workDir: process.cwd(),
   tools: {},
+  webServerPort: 8080,
 };
 
 export function ensureDataDir(): void {

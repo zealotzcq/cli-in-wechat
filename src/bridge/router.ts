@@ -15,6 +15,7 @@ interface ActiveTask { abort: AbortController; tool: string }
 interface PendingQuestion { resolve: (answer: string) => void; timeout: ReturnType<typeof setTimeout>; toolName: string }
 
 const TOOL_ALIASES: Record<string, string> = {
+  ccb: 'ccb',
   claude: 'claude', cc: 'claude',
   codex: 'codex', cx: 'codex',
   gemini: 'gemini', gm: 'gemini',
@@ -222,7 +223,7 @@ export class Router {
           '/cc /cx /gm /km /oc  切工具',
           '',
           '— 发消息 —',
-          '@claude/@codex/@gemini/@kimi/@opencode  指定工具',
+          '@ccb/@claude/@codex/@gemini/@kimi/@opencode  指定工具',
           '@web  Web调试通道',
           '>>  接力(传上条结果)',
           '@tool1>tool2  链式调用',
@@ -667,6 +668,8 @@ export class Router {
       // 工具切换
       // ═══════════════════════════════════════════
 
+      case 'ccb':
+        this.sessions.update(uid, { defaultTool: 'ccb' }); await reply('→ ccb'); return true;
       case 'claude': case 'cc':
         this.sessions.update(uid, { defaultTool: 'claude' }); await reply('→ claude'); return true;
       case 'codex': case 'cx':

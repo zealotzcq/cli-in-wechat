@@ -1,5 +1,6 @@
 import { log } from '../utils/logger.js';
 import type { CLIAdapter } from './base.js';
+import { CcbAdapter } from './ccb.js';
 import { ClaudeAdapter } from './claude.js';
 import { CodexAdapter } from './codex.js';
 import { GeminiAdapter } from './gemini.js';
@@ -14,6 +15,7 @@ export class AdapterRegistry {
   private byDisplayName = new Map<string, string>(); // displayName → name
 
   constructor(messageQueue?: MessageQueue) {
+    this.register(new CcbAdapter());
     this.register(new ClaudeAdapter());
     this.register(new CodexAdapter());
     this.register(new GeminiAdapter());

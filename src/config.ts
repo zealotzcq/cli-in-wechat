@@ -23,7 +23,6 @@ export interface BridgeConfig {
   allowedUsers: string[];
   workDir: string;
   tools: Record<string, ToolConfig>;
-  webServerPort: number;
 }
 
 const DEFAULT_CONFIG: BridgeConfig = {
@@ -34,7 +33,6 @@ const DEFAULT_CONFIG: BridgeConfig = {
   allowedUsers: [],
   workDir: process.cwd(),
   tools: {},
-  webServerPort: 8080,
 };
 
 export function ensureDataDir(): void {

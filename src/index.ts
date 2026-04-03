@@ -4,8 +4,6 @@ import { ILinkClient } from './ilink/client.js';
 import { AdapterRegistry } from './adapters/registry.js';
 import { SessionManager } from './bridge/session.js';
 import { Router } from './bridge/router.js';
-import { MessageQueue } from './web/message-queue.js';
-import { WebServer } from './web/server.js';
 import {
   loadConfig,
   loadCredentials,
@@ -38,16 +36,10 @@ async function main() {
     setLogLevel(LogLevel.DEBUG);
   }
 
-  // ─── 1. Start Web Server ─────────────────────────────
-
-  const messageQueue = new MessageQueue();
-  const webServer = new WebServer(config.webServerPort, messageQueue);
-  await webServer.start();
-
-  // ─── 2. Detect CLI tools ─────────────────────────────
+  // ─── 1. Detect CLI tools ─────────────────────────────
 
   log.info('检测已安装的 CLI 工具...');
-  const registry = new AdapterRegistry(messageQueue);
+  const registry = new AdapterRegistry();
   await registry.detectAvailable();
 
   const available = registry.getAvailableNames();
@@ -98,14 +90,13 @@ async function main() {
 
   const ilink = new ILinkClient(credentials);
   const sessions = new SessionManager();
-  const router = new Router(ilink, registry, sessions, config, messageQueue);
+  const router = new Router(ilink, registry, sessions, config);
 
   router.start();
   ilink.start();
 
   log.info(`桥接服务已启动`);
   log.info(`默认工具: ${config.defaultTool} | 可用: ${available.join(', ')}`);
-  log.info(`Web调试通道: http://localhost:${config.webServerPort}`);
   log.info('在微信 ClawBot 中发送消息即可开始');
   log.info('Ctrl+C 退出');
 
@@ -113,7 +104,6 @@ async function main() {
 
   const shutdown = () => {
     log.info('正在关闭...');
-    webServer.stop();
     ilink.stop();
     process.exit(0);
   };

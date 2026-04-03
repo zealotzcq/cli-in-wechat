@@ -111,7 +111,6 @@ import { formatResponse } from './formatter.js';
 import type { WeixinMessage } from '../ilink/types.js';
 import type { BridgeConfig } from '../config.js';
 import type { AskUserRequest } from '../adapters/base.js';
-import type { MessageQueue } from '../web/message-queue.js';
 
 interface ActiveTask { abort: AbortController; tool: string }
 interface PendingQuestion { resolve: (answer: string) => void; timeout: ReturnType<typeof setTimeout>; toolName: string }
@@ -123,7 +122,6 @@ const TOOL_ALIASES: Record<string, string> = {
   gemini: 'gemini', gm: 'gemini',
   kimi: 'kimi', km: 'kimi',
   opencode: 'opencode', oc: 'opencode',
-  web: 'web', wb: 'web',
 };
 
 export class Router {
@@ -135,14 +133,12 @@ export class Router {
   private lastResponse = new Map<string, { tool: string; text: string }>();
   private pendingQuestions = new Map<string, PendingQuestion>();
   private _lastSessionList: Array<{ id: string; date: string; summary: string }> | null = null;
-  private messageQueue?: MessageQueue;
 
-  constructor(ilink: ILinkClient, registry: AdapterRegistry, sessions: SessionManager, config: BridgeConfig, messageQueue?: MessageQueue) {
+  constructor(ilink: ILinkClient, registry: AdapterRegistry, sessions: SessionManager, config: BridgeConfig) {
     this.ilink = ilink;
     this.registry = registry;
     this.sessions = sessions;
     this.config = config;
-    this.messageQueue = messageQueue;
   }
 
   start(): void {
@@ -298,7 +294,6 @@ export class Router {
           '..gm       切换到 Gemini',
           '..km       切换到 Kimi',
           '..oc       切换到 OpenCode',
-          '..wb       切换到 Web',
           '..pj / ..project  列出/选择工程',
           '..re / ..resume   列出/恢复会话',
           '..new      新建会话',
@@ -920,8 +915,6 @@ export class Router {
         this.sessions.update(uid, { defaultTool: 'kimi' }); await reply('→ kimi'); return true;
       case 'opencode': case 'oc':
         this.sessions.update(uid, { defaultTool: 'opencode' }); await reply('→ opencode'); return true;
-      case 'web': case 'wb':
-        this.sessions.update(uid, { defaultTool: 'web' }); await reply('→ web'); return true;
 
       // ═══════════════════════════════════════════
       // 未识别
@@ -1220,48 +1213,28 @@ export class Router {
     const stopTyping = await this.ilink.startTyping(uid);
     const start = Date.now();
 
-    if (toolName === 'web' && this.messageQueue) {
-      this.messageQueue.addInboundMessage(prompt);
-      await this.ilink.sendText(uid, '消息已发送到Web调试通道');
+    try {
+      const { result, notice } = await this.runOnce(toolName, uid, prompt, abort.signal);
 
-      try {
-        const { result } = await this.runOnce(toolName, uid, prompt, abort.signal);
+      if (abort.signal.aborted) return;
 
-        if (abort.signal.aborted) return;
-
-        if (result.text && !result.error) {
-          await this.ilink.sendText(uid, result.text);
-        }
-      } catch (err: unknown) {
-        if (!abort.signal.aborted) {
-          log.error(`[web] 失败:`, err);
-          await this.ilink.sendText(uid, `失败: ${(err as Error).message}`);
-        }
+      if (result.sessionId && adapter.capabilities.sessionResume) {
+        this.sessions.setSession(uid, toolName, result.sessionId);
       }
-    } else {
-      try {
-        const { result, notice } = await this.runOnce(toolName, uid, prompt, abort.signal);
 
-        if (abort.signal.aborted) return;
+      // Store for >> relay; auto-switch defaultTool to last used tool
+      this.lastResponse.set(uid, { tool: adapter.displayName, text: result.text });
+      this.sessions.update(uid, { defaultTool: toolName });
 
-        if (result.sessionId && adapter.capabilities.sessionResume) {
-          this.sessions.setSession(uid, toolName, result.sessionId);
-        }
-
-        // Store for >> relay; auto-switch defaultTool to last used tool
-        this.lastResponse.set(uid, { tool: adapter.displayName, text: result.text });
-        this.sessions.update(uid, { defaultTool: toolName });
-
-        await this.ilink.sendText(uid, formatResponse(notice + result.text, {
-          tool: adapter.displayName,
-          duration: result.duration || (Date.now() - start),
-          error: result.error,
-        }));
-      } catch (err: unknown) {
-        if (!abort.signal.aborted) {
-          log.error(`[${toolName}] 失败:`, err);
-          await this.ilink.sendText(uid, `失败: ${(err as Error).message}`);
-        }
+      await this.ilink.sendText(uid, formatResponse(notice + result.text, {
+        tool: adapter.displayName,
+        duration: result.duration || (Date.now() - start),
+        error: result.error,
+      }));
+    } catch (err: unknown) {
+      if (!abort.signal.aborted) {
+        log.error(`[${toolName}] 失败:`, err);
+        await this.ilink.sendText(uid, `失败: ${(err as Error).message}`);
       }
     }
 

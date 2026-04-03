@@ -1,28 +1,25 @@
 import { log } from '../utils/logger.js';
 import type { CLIAdapter, ExecOptions, ExecResult, AdapterCapabilities } from './base.js';
-import { spawnProc, setupAbort, setupTimeout, isSessionError } from './base.js';
-import { existsSync } from 'node:fs';
+import { commandExists, spawnProc, setupAbort, setupTimeout, isSessionError } from './base.js';
 
 export class CcbAdapter implements CLIAdapter {
   readonly name = 'ccb';
   readonly displayName = 'CCB';
-  readonly command = 'ccb.exe';
+  readonly command = 'ccb';
   readonly capabilities: AdapterCapabilities = {
     streaming: true, jsonOutput: true, sessionResume: true,
     modes: ['auto', 'safe', 'plan'], hasEffort: true, hasModel: true, hasSearch: false, hasBudget: true,
   };
 
-  private readonly binPath = 'd:\\Program Files\\Git\\cmd\\ccb.exe';
-
   async isAvailable(): Promise<boolean> {
-    return existsSync(this.binPath);
+    return commandExists(this.command);
   }
 
   async execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return this.executeWithCLI(prompt, opts);
   }
 
-  // ─── CLI execution (no AskUserQuestion) ─────────────────
+  // ─── CLI fallback (same as Claude Code) ─────────────────
 
   private executeWithCLI(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {

@@ -11,6 +11,7 @@ export interface UserSettings {
   sessionIds: Record<string, string>;
   systemPrompt: string;
   workDir: string;
+  currentProject: string;  // Current selected project (encoded directory name)
 
   // ── Claude Code ──
   effort: string;
@@ -44,7 +45,8 @@ export const DEFAULT_SETTINGS: UserSettings = {
   model: '',
   sessionIds: {},
   systemPrompt: '',
-  workDir: '',
+  workDir: '',  // Empty string means use config default
+  currentProject: '',  // Empty = show all projects
   effort: 'high',
   maxTurns: 30,
   maxBudget: 0,

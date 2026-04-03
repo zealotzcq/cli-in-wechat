@@ -1,7 +1,109 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { log } from '../utils/logger.js';
+
+/**
+ * Encode a path to Claude's project directory naming scheme:
+ * - ':\' or ':/' → '--' (e.g., 'G:\' → 'G--')
+ * - remaining '/' or '\' → '-'
+ * Example: 'G:\platform\src\github\cli-in-wechat' → 'G--platform-src-github-cli-in-wechat'
+ */
+function encodeProjectPath(path: string): string {
+  // First, handle ':\' or ':/' → '--'
+  // Then, remaining '/' or '\' → '-'
+  return path
+    .replace(/:[\/\\]/g, '--')
+    .replace(/[\/\\]/g, '-');
+}
+
+/**
+ * Find the actual path for a project by searching the filesystem.
+ * This handles cases where directory names contain '-' characters.
+ *
+ * For example, 'G--platform-src-github-cli-in-wechat' should resolve to
+ * 'G:\platform\src\github\cli-in-wechat' (if that path exists).
+ *
+ * The function uses a greedy matching strategy: it tries to match as many
+ * consecutive segments as possible to handle cases where '-' appears in
+ * directory names (e.g., 'cli-in-wechat').
+ */
+function findProjectPath(encodedName: string): string | null {
+  // Extract drive letter (first character before '--')
+  const driveMatch = encodedName.match(/^([a-zA-Z])--/);
+  if (!driveMatch) return null;
+
+  const driveLetter = driveMatch[1];
+  const drivePath = driveLetter + ':' + sep;
+
+  // Build path segments from the encoded name
+  const rest = encodedName.substring(3); // Skip 'X--'
+  const segments = rest.split('-').filter(s => s); // Remove empty segments
+
+  // Try to resolve each segment by searching the filesystem
+  let currentPath = drivePath;
+
+  for (let i = 0; i < segments.length; i++) {
+    // Check if current directory exists
+    if (!existsSync(currentPath)) return null;
+
+    const items = readdirSync(currentPath, { withFileTypes: true });
+
+    // Try to match remaining segments (in case '-' was part of directory name)
+    let matched = false;
+    for (let j = segments.length - i; j >= 1; j--) {
+      const candidate = segments.slice(i, i + j).join('-');
+      const matchedDir = items.find(d => d.isDirectory() && d.name.toLowerCase() === candidate.toLowerCase());
+
+      if (matchedDir) {
+        currentPath = join(currentPath, matchedDir.name);
+        i += j - 1; // Skip the matched segments
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) {
+      // No match found, this path doesn't exist
+      return null;
+    }
+  }
+
+  return currentPath;
+}
+
+/**
+ * Decode a Claude project directory name back to a platform-specific path.
+ * Example: 'G--platform-src-github-cli-in-wechat' → 'G:\platform\src\github\cli-in-wechat'
+ *
+ * The encoded format uses '--' for the drive letter separator (e.g., 'G--' represents 'G:\')
+ * and '-' for all other path separators.
+ *
+ * This function uses filesystem search to handle paths with '-' in directory names.
+ */
+function decodeProjectName(name: string): string {
+  // First, try to find the actual path using filesystem search
+  const foundPath = findProjectPath(name);
+  if (foundPath) {
+    return foundPath;
+  }
+
+  // Fallback to simple decoding (may not be perfect for paths with '-')
+  const driveMatch = name.match(/^([a-zA-Z])--/);
+  if (!driveMatch) {
+    // No drive letter found, assume Unix-style path with '-' as separators
+    return name.replace(/-/g, sep);
+  }
+
+  const driveLetter = driveMatch[1];
+  const rest = name.substring(3); // Skip 'X--' (3 characters)
+
+  // Rebuild path with platform separator
+  if (rest) {
+    return driveLetter + ':' + sep + rest.replace(/-/g, sep);
+  }
+  return driveLetter + ':' + sep;
+}
 import { ILinkClient } from '../ilink/client.js';
 import { AdapterRegistry } from '../adapters/registry.js';
 import { SessionManager } from './session.js';
@@ -75,11 +177,22 @@ export class Router {
     const uid = msg.from_user_id;
     if (this.config.allowedUsers.length > 0 && !this.config.allowedUsers.includes(uid)) return;
 
-    const trimmed = text.trim();
+    let trimmed = text.trim();
 
-    // ── /command ──
-    if (trimmed.startsWith('/')) {
-      await this.handleSlash(uid, trimmed);
+    // ── Parse @tool prefix ──
+    let explicitTool: string | undefined;
+    const atToolMatch = trimmed.match(/^@(\w+)\s+(.+)$/);
+    if (atToolMatch) {
+      const resolved = TOOL_ALIASES[atToolMatch[1].toLowerCase()];
+      if (resolved && this.registry.isAvailable(resolved)) {
+        explicitTool = resolved;
+        trimmed = atToolMatch[2].trim(); // Remove @tool prefix
+      }
+    }
+
+    // ── Channel-level commands (process all ..commands through handleSlash) ──
+    if (trimmed.startsWith('..')) {
+      await this.handleSlash(uid, trimmed, explicitTool);
       return;
     }
 
@@ -157,14 +270,17 @@ export class Router {
     await this.exec(uid, toolName, combined);
   }
 
-  // ─── /command → ALL are commands, never pass through ────
+  // ─── ..command → ALL are commands, never pass through ────
 
-  private async handleSlash(uid: string, text: string): Promise<boolean> {
-    const parts = text.substring(1).split(/\s+/);
+  private async handleSlash(uid: string, text: string, explicitTool?: string): Promise<boolean> {
+    const parts = text.substring(2).split(/\s+/);
     const cmd = parts[0].toLowerCase();
     const arg = parts.slice(1).join(' ').trim();
     const settings = this.sessions.get(uid);
     const reply = (msg: string) => this.ilink.sendText(uid, msg);
+
+    // Use explicitly specified tool (from @tool /command) or fall back to default
+    const tool = explicitTool || settings.defaultTool || this.config.defaultTool;
 
     switch (cmd) {
       // ═══════════════════════════════════════════
@@ -173,60 +289,31 @@ export class Router {
 
       case 'help': case 'h':
         await reply([
-          '=== cli-in-wechat 命令 ===',
+          '=== cli-in-wechat 通道命令 ===',
           '',
-          '— 设置 —',
-          '/status  查看所有配置',
-          '/model <名>  切模型',
-          '/mode <auto|safe|plan>  权限',
-          '/effort <low|med|high|max>  深度',
-          '/turns <数>  最大轮次',
-          '/budget <$>  预算(off=无限)',
-          '/dir <路径>  工作目录',
-          '/system <词>  追加系统提示',
-          '/tools <列表>  允许工具',
-          '/notool <列表>  禁用工具',
-          '/verbose  详细输出',
-          '/bare  跳过配置加载',
-          '/adddir <路径>  额外目录',
-          '/name <名>  会话命名',
-          '/sandbox <ro|write|full>  沙箱',
-          '/search  web搜索(Codex)',
-          '/ephemeral  临时模式(Codex)',
-          '/profile <名>  配置(Codex)',
-          '/approval <模式>  审批(Gemini)',
-          '/include <目录>  上下文(Gemini)',
-          '/ext <名>  扩展(Gemini)',
-          '/thinking  深度思考(Kimi)',
+          '— 通道级命令 —',
+          '..ccb      切换到 CCB 工具',
+          '..cc       切换到 Claude',
+          '..cx       切换到 Codex',
+          '..gm       切换到 Gemini',
+          '..km       切换到 Kimi',
+          '..oc       切换到 OpenCode',
+          '..wb       切换到 Web',
+          '..pj / ..project  列出/选择工程',
+          '..re / ..resume   列出/恢复会话',
+          '..new      新建会话',
+          '..info     查看当前状态',
+          '..help     显示帮助',
           '',
-          '— 操作 —',
-          '/diff  查看git差异',
-          '/commit  创建git提交',
-          '/review  代码审查',
-          '/plan [描述]  规划模式/制定计划',
-          '/init  创建项目配置文件',
-          '/files  列出目录结构',
-          '/compact  压缩上下文(清session)',
-          '/stats  使用统计',
+          '— 发消息方式 —',
+          '@ccb <消息>       指定使用 CCB',
+          '>> <消息>         接力上条结果',
+          '@tool1>tool2      链式调用',
           '',
-          '— 会话 —',
-          '/new  新会话',
-          '/clear  清除所有',
-          '/cancel  取消任务',
-          '/fork  分支当前会话',
-          '/resume  查看保存的会话',
-          '',
-          '— 快捷 —',
-          '/yolo  auto+effort max',
-          '/fast  effort low',
-          '/reset  重置所有设置',
-          '/cc /cx /gm /km /oc  切工具',
-          '',
-          '— 发消息 —',
-          '@ccb/@claude/@codex/@gemini/@kimi/@opencode  指定工具',
-          '@web  Web调试通道',
-          '>>  接力(传上条结果)',
-          '@tool1>tool2  链式调用',
+          '— 会话管理 —',
+          'CCB 自动管理会话连续性，',
+          '用 ..resume 查看所有历史会话',
+          '用 ..project 选择工程',
         ].join('\n'));
         return true;
 
@@ -252,10 +339,44 @@ export class Router {
         return true;
       }
 
-      case 'new': case 'n':
-        this.sessions.clearSession(uid);
-        await reply('新会话');
+      case 'info': {
+        const currentTool = settings.defaultTool || this.config.defaultTool || '未设置';
+        const currentProject = this.sessions.getCurrentProject(uid);
+        let projectDisplay = '未选择工程';
+        if (currentProject === 'all') {
+          projectDisplay = '所有工程';
+        } else if (currentProject) {
+          projectDisplay = currentProject;
+        }
+        const currentSession = settings.sessionIds[currentTool] || '无';
+        const lines = [
+          '=== 当前状态 ===',
+          '',
+          `通道: ${currentTool}`,
+          `工程: ${projectDisplay}`,
+          `Session: ${currentSession.substring(0, 12)}...`,
+        ];
+        await reply(lines.join('\n'));
         return true;
+      }
+
+      case 'status': case 'st': {
+        // Same as info - merge the two commands
+        return this.handleSlash(uid, text.replace('status', 'info').replace('st', 'info'), explicitTool);
+      }
+
+      case 'new': case 'n': {
+        const currentProject = this.sessions.getCurrentProject(uid);
+        if (!currentProject || currentProject === 'all') {
+          await reply('请先选择工程：\n..project 查看工程列表\n..project <编号> 选择工程');
+          return true;
+        }
+        // Clear session for current project only
+        const tool = settings.defaultTool || this.config.defaultTool;
+        this.sessions.clearSession(uid, tool);
+        await reply(`工程 "${currentProject}" 新会话已创建`);
+        return true;
+      }
 
       case 'cancel': case 'c': {
         const tasks = [...this.active.entries()].filter(([k]) => k.startsWith(`${uid}:`));
@@ -503,7 +624,6 @@ export class Router {
       }
 
       case 'diff': {
-        const tool = settings.defaultTool || this.config.defaultTool;
         if (this.registry.isAvailable(tool)) {
           await this.exec(uid, tool, arg || 'Show the current git diff of uncommitted changes. Be concise.');
         }
@@ -511,7 +631,6 @@ export class Router {
       }
 
       case 'commit': {
-        const tool = settings.defaultTool || this.config.defaultTool;
         if (this.registry.isAvailable(tool)) {
           await this.exec(uid, tool, arg || 'Create a git commit for all staged changes with an appropriate commit message.');
         }
@@ -519,7 +638,6 @@ export class Router {
       }
 
       case 'review': {
-        const tool = settings.defaultTool || this.config.defaultTool;
         if (this.registry.isAvailable(tool)) {
           await this.exec(uid, tool, arg || 'Review the current code changes (git diff) and provide feedback on quality, bugs, and improvements.');
         }
@@ -527,7 +645,6 @@ export class Router {
       }
 
       case 'init': {
-        const tool = settings.defaultTool || this.config.defaultTool;
         const file = tool === 'codex' ? 'AGENTS.md' : tool === 'gemini' ? 'GEMINI.md' : 'CLAUDE.md';
         if (this.registry.isAvailable(tool)) {
           await this.exec(uid, tool, arg || `Analyze this project and create a ${file} configuration file with appropriate instructions.`);
@@ -537,7 +654,6 @@ export class Router {
 
       case 'fork': case 'branch': {
         // Fork = clear session ID so next call doesn't --resume
-        const tool = settings.defaultTool || this.config.defaultTool;
         this.sessions.clearSession(uid, tool);
         await reply(`已 fork ${tool} 会话 (下次消息开始新分支)`);
         return true;
@@ -564,7 +680,6 @@ export class Router {
       case 'plan': {
         if (arg) {
           // /plan <description> → send plan request to tool
-          const tool = settings.defaultTool || this.config.defaultTool;
           if (this.registry.isAvailable(tool)) {
             await this.exec(uid, tool, `Create a detailed plan for: ${arg}. Only plan, do not execute.`);
           }
@@ -577,13 +692,13 @@ export class Router {
       }
 
       case 'continue': {
-        // Alias for /resume
+        // Alias for ..resume
         const sids = Object.entries(settings.sessionIds);
         if (sids.length === 0) {
-          await reply('无活跃会话，用 /resume 浏览历史');
+          await reply('无活跃会话，用 ..resume 浏览历史');
         } else {
           const lines = sids.map(([k, v]) => `${k}: ${String(v).substring(0, 12)}...`);
-          await reply(`活跃会话:\n${lines.join('\n')}\n\n/resume 浏览所有历史`);
+          await reply(`活跃会话:\n${lines.join('\n')}\n\n..resume 浏览所有历史`);
         }
         return true;
       }
@@ -596,7 +711,6 @@ export class Router {
       }
 
       case 'session': {
-        const tool = settings.defaultTool || this.config.defaultTool;
         if (arg.startsWith('set ')) {
           const id = arg.substring(4).trim();
           this.sessions.setSession(uid, tool, id);
@@ -606,42 +720,168 @@ export class Router {
           const lines = sids.length > 0
             ? sids.map(([k, v]) => `${k}: ${v}`).join('\n')
             : '(无活跃会话)';
-          await reply(`活跃会话:\n${lines}\n\n/session set <id> 手动设置\n/resume 浏览所有历史会话`);
+          await reply(`活跃会话:\n${lines}\n\n..session set <id> 手动设置\n..resume 浏览所有历史会话`);
         }
         return true;
       }
 
-      case 'resume': case 'sessions': {
-        const tool = settings.defaultTool || this.config.defaultTool;
-        if (arg) {
-          // /resume <number> → pick from list, or /resume <uuid> → direct set
-          const num = parseInt(arg);
-          if (!isNaN(num) && this._lastSessionList) {
-            const pick = this._lastSessionList[num - 1];
-            if (pick) {
-              this.sessions.setSession(uid, tool, pick.id);
-              await reply(`已恢复 ${tool} 会话:\n${pick.summary}\n\nID: ${pick.id}`);
-            } else {
-              await reply(`无效编号，范围 1-${this._lastSessionList.length}`);
+      case 'project': case 'pj': {
+        const projectsDir = join(homedir(), '.claude', 'projects');
+        try {
+          const projectDirs = readdirSync(projectsDir, { withFileTypes: true })
+            .filter(d => d.isDirectory())
+            .map(d => d.name)
+            .sort();
+
+          if (arg) {
+            // ..project all → show sessions from all projects
+            if (arg.toLowerCase() === 'all') {
+              this.sessions.setCurrentProject(uid, 'all');
+              await reply('已切换到显示所有工程\n\n..resume 查看所有工程的会话');
+              return true;
             }
+
+            // ..project <number> or <name> → select project
+            const num = parseInt(arg);
+            let selectedProject = '';
+
+            if (!isNaN(num) && num > 0 && num <= projectDirs.length) {
+              selectedProject = projectDirs[num - 1];
+            } else {
+              // Try to find by name
+              const match = projectDirs.find(p => p.toLowerCase().includes(arg.toLowerCase()));
+              if (match) {
+                selectedProject = match;
+              }
+            }
+
+            if (selectedProject) {
+              // Decode project name to actual path and set as workDir
+              const projectPath = decodeProjectName(selectedProject);
+              this.sessions.setCurrentProject(uid, selectedProject);
+              this.sessions.update(uid, { workDir: projectPath });
+
+              // Immediately list sessions for this project
+              const tool = settings.defaultTool || this.config.defaultTool;
+              const list = this.listSessions(tool, projectPath, selectedProject);
+              const currentSessionId = settings.sessionIds[tool] || '';
+
+              if (list.length === 0) {
+                await reply(`已选择工程: ${selectedProject}\n\n该工程没有历史会话`);
+                return true;
+              }
+
+              // Store the list for subsequent ..resume command
+              this._lastSessionList = list;
+
+              const lines = list.map((s, i) => {
+                const isCurrent = s.id === currentSessionId || s.id.startsWith(currentSessionId.substring(0, 8));
+                const marker = isCurrent ? ' [当前]' : '';
+                return `${i + 1}. ${s.date} ${s.summary}${marker}\n   ${s.id}`;
+              });
+
+              await reply(`已选择工程: ${selectedProject}\n\n会话列表 (最近${list.length}条):\n\n${lines.join('\n\n')}\n\n回复 ..resume <编号> 恢复会话`);
+            } else {
+              await reply(`工程未找到。可用: ${projectDirs.join(', ')}`);
+            }
+            return true;
+          }
+
+          // List all projects
+          const current = this.sessions.getCurrentProject(uid);
+          const lines = projectDirs.map((p, i) => {
+            const marker = p === current ? ' [当前]' : '';
+            return `${i + 1}. ${p}${marker}`;
+          });
+
+          const statusNote = current === ''
+            ? '\n未选择工程，请先选择一个工程'
+            : current === 'all'
+            ? '\n当前显示所有工程\n..project <编号> 切换到单个工程'
+            : `\n当前工程: ${current}\n..project all 切换到显示所有工程`;
+
+          await reply(`可用工程 (${projectDirs.length}个):\n\n${lines.join('\n')}\n\n回复 ..project <编号> 选择工程\n回复 ..project all 显示所有工程${statusNote}`);
+        } catch (err) {
+          await reply(`无法读取工程列表: ${(err as Error).message}`);
+        }
+        return true;
+      }
+
+      case 'resume': case 're': case 'sessions': {
+        const currentProject = this.sessions.getCurrentProject(uid);
+
+        // Require project selection (unless showing all projects)
+        if (!currentProject) {
+          await reply('请先选择工程：\n..project 查看工程列表\n..project <编号> 选择工程');
+          return true;
+        }
+
+        if (arg) {
+          // ..resume <number> → pick from list, or ..resume <uuid> → direct set
+          const num = parseInt(arg);
+          if (!isNaN(num)) {
+            // User provided a number, need to pick from list
+            if (!this._lastSessionList) {
+              await reply('请先列出会话，使用以下方式之一：\n• ..resume (查看当前工程会话)\n• ..project <编号> (选择工程并自动列出会话)');
+              return true;
+            }
+            if (num < 1 || num > this._lastSessionList.length) {
+              await reply(`无效编号，范围 1-${this._lastSessionList.length}`);
+              return true;
+            }
+            const pick = this._lastSessionList[num - 1];
+            // Decode project path and set as workDir before resuming
+            const workDir = currentProject === 'all' ? (settings.workDir || this.config.workDir) : decodeProjectName(currentProject);
+            if (currentProject !== 'all') {
+              this.sessions.update(uid, { workDir });
+            }
+            // Set session ID and also update defaultTool to ensure subsequent messages use the same tool
+            this.sessions.setSession(uid, tool, pick.id);
+            this.sessions.update(uid, { defaultTool: tool });
+            log.debug(`[${tool}] resume: session=${pick.id}, workDir=${workDir}`);
+            await reply(`已恢复 ${tool} 会话:\n${pick.summary}\n\nID: ${pick.id}\n工作目录: ${workDir}`);
           } else {
-            // Treat as UUID
-            this.sessions.setSession(uid, tool, arg.trim());
-            await reply(`${tool} session → ${arg.trim()}`);
+            // Treat as UUID - validate UUID format
+            const sessionId = arg.trim();
+            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (!uuidRegex.test(sessionId)) {
+              await reply(`无效的 UUID 格式\n请使用完整 UUID (例如: 550e8400-e29b-41d4-a716-446655440000)\n或先列出会话后使用编号: ..resume`);
+              return true;
+            }
+            // Update workDir if single project selected
+            if (currentProject !== 'all') {
+              const workDir = decodeProjectName(currentProject);
+              this.sessions.update(uid, { workDir });
+            }
+            this.sessions.setSession(uid, tool, sessionId);
+            this.sessions.update(uid, { defaultTool: tool });
+            log.debug(`[${tool}] resume: session=${sessionId} (direct UUID)`);
+            await reply(`${tool} session → ${sessionId}`);
           }
           return true;
         }
-        // List all sessions for current tool
-        const list = this.listSessions(tool, settings.workDir || this.config.workDir);
+        // List all sessions for current tool and project
+        const workDir = currentProject === 'all' ? (settings.workDir || this.config.workDir) : decodeProjectName(currentProject);
+        const list = this.listSessions(tool, workDir, currentProject === 'all' ? undefined : currentProject);
         if (list.length === 0) {
-          await reply(`${tool} 没有历史会话`);
+          if (currentProject === 'all') {
+            await reply(`${tool} 没有历史会话`);
+          } else {
+            await reply(`${tool} 在工程 "${currentProject}" 中没有历史会话`);
+          }
           return true;
         }
         this._lastSessionList = list;
-        const lines = list.map((s, i) =>
-          `${i + 1}. ${s.date} ${s.summary}\n   ${s.id}`
-        );
-        await reply(`${tool} 历史会话 (最近${list.length}条):\n\n${lines.join('\n\n')}\n\n回复 /resume <编号> 恢复`);
+        const currentSessionId = settings.sessionIds[tool] || '';
+
+        const lines = list.map((s, i) => {
+          const isCurrent = s.id === currentSessionId || s.id.startsWith(currentSessionId.substring(0, 8));
+          const marker = isCurrent ? ' [当前]' : '';
+          return `${i + 1}. ${s.date} ${s.summary}${marker}\n   ${s.id}`;
+        });
+
+        const projectInfo = currentProject === 'all' ? '所有工程' : currentProject;
+        await reply(`${tool} 历史会话 (${projectInfo}, 最近${list.length}条):\n\n${lines.join('\n\n')}\n\n回复 ..resume <编号> 恢复`);
         return true;
       }
 
@@ -688,62 +928,92 @@ export class Router {
       // ═══════════════════════════════════════════
 
       default:
-        await reply(`未知命令: /${cmd}\n/help 查看所有命令`);
+        await reply(`未知命令: ..${cmd}\n..help 查看所有命令`);
         return true;
     }
   }
 
   // ─── List historical sessions ───────────────────────────
 
-  private listSessions(tool: string, workDir: string): Array<{ id: string; date: string; summary: string }> {
+  private listSessions(tool: string, workDir: string, currentProject?: string): Array<{ id: string; date: string; summary: string }> {
     try {
       // Claude: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
+      // CCB: same as Claude (compatible)
       // Codex: ~/.codex/sessions/YYYY/MM/DD/*.jsonl
       // Gemini: different structure
-      let dir = '';
-      if (tool === 'claude') {
-        const encoded = workDir.replace(/[^a-zA-Z0-9]/g, '-');
-        dir = join(homedir(), '.claude', 'projects', encoded);
-      } else if (tool === 'codex') {
-        dir = join(homedir(), '.codex', 'sessions');
+
+      if (tool === 'codex') {
+        const dir = join(homedir(), '.codex', 'sessions');
         return this.listCodexSessions(dir);
-      } else {
+      }
+
+      if (tool !== 'claude' && tool !== 'ccb') {
         return [];
       }
 
-      const files = readdirSync(dir)
-        .filter(f => f.endsWith('.jsonl'))
-        .map(f => {
-          const fullPath = join(dir, f);
-          const id = f.replace('.jsonl', '');
-          try {
-            const stat = statSync(fullPath);
-            const firstLines = readFileSync(fullPath, 'utf-8').split('\n').slice(0, 5);
-            let summary = '(无摘要)';
-            let date = stat.mtime.toISOString().slice(0, 16).replace('T', ' ');
-            for (const line of firstLines) {
-              if (!line.trim()) continue;
-              try {
-                const obj = JSON.parse(line);
-                if (obj.type === 'user' && obj.message?.content) {
-                  const content = typeof obj.message.content === 'string'
-                    ? obj.message.content
-                    : obj.message.content.map((b: { text?: string }) => b.text || '').join('');
-                  summary = content.substring(0, 60) + (content.length > 60 ? '...' : '');
-                  if (obj.timestamp) date = obj.timestamp.slice(0, 16).replace('T', ' ');
-                  break;
-                }
-              } catch { continue; }
-            }
-            return { id, date, summary, mtime: stat.mtime.getTime() };
-          } catch {
-            return { id, date: '', summary: '(读取失败)', mtime: 0 };
-          }
-        })
-        .sort((a, b) => b.mtime - a.mtime)
-        .slice(0, 15);
+      const projectsDir = join(homedir(), '.claude', 'projects');
+      const results: Array<{ id: string; date: string; summary: string; mtime: number }> = [];
 
-      return files.map(({ id, date, summary }) => ({ id, date, summary }));
+      // Get project directories to scan
+      let projectDirs: string[];
+      if (currentProject) {
+        // Only scan selected project
+        if (existsSync(join(projectsDir, currentProject))) {
+          projectDirs = [currentProject];
+        } else {
+          // Project not found, clear selection
+          projectDirs = readdirSync(projectsDir, { withFileTypes: true })
+            .filter(d => d.isDirectory())
+            .map(d => d.name);
+        }
+      } else {
+        // Scan all projects
+        projectDirs = readdirSync(projectsDir, { withFileTypes: true })
+          .filter(d => d.isDirectory())
+          .map(d => d.name);
+      }
+
+      for (const projectDir of projectDirs) {
+        const dir = join(projectsDir, projectDir);
+        const files = readdirSync(dir)
+          .filter(f => f.endsWith('.jsonl'))
+          .map(f => {
+            const fullPath = join(dir, f);
+            const id = f.replace('.jsonl', '');
+            try {
+              const stat = statSync(fullPath);
+              const firstLines = readFileSync(fullPath, 'utf-8').split('\n').slice(0, 5);
+              let summary = '(无摘要)';
+              let date = stat.mtime.toISOString().slice(0, 16).replace('T', ' ');
+              for (const line of firstLines) {
+                if (!line.trim()) continue;
+                try {
+                  const obj = JSON.parse(line);
+                  if (obj.type === 'user' && obj.message?.content) {
+                    const content = typeof obj.message.content === 'string'
+                      ? obj.message.content
+                      : obj.message.content.map((b: { text?: string }) => b.text || '').join('');
+                    // Add project prefix only when showing all projects
+                    const prefix = currentProject ? '' : `[${projectDir}] `;
+                    summary = prefix + content.substring(0, 60) + (content.length > 60 ? '...' : '');
+                    if (obj.timestamp) date = obj.timestamp.slice(0, 16).replace('T', ' ');
+                    break;
+                  }
+                } catch { continue; }
+              }
+              return { id, date, summary, mtime: stat.mtime.getTime() };
+            } catch {
+              const prefix = currentProject ? '' : `[${projectDir}] `;
+              return { id, date: '', summary: prefix + '(读取失败)', mtime: 0 };
+            }
+          });
+        results.push(...files);
+      }
+
+      return results
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, 30)
+        .map(({ id, date, summary }) => ({ id, date, summary }));
     } catch {
       return [];
     }
@@ -856,11 +1126,25 @@ export class Router {
   ): Promise<{ result: import('../adapters/base.js').ExecResult; notice: string }> {
     const adapter = this.registry.get(toolName)!;
     const extraArgs = this.config.tools[toolName]?.args;
-    const hadSession = adapter.capabilities.sessionResume && !!this.sessions.get(uid).sessionIds[toolName];
+    const userSettings = this.sessions.get(uid);
+    const sessionId = userSettings.sessionIds[toolName];
+    const hadSession = adapter.capabilities.sessionResume && !!sessionId;
 
     if (signal.aborted) return { result: { text: '已取消', error: true }, notice: '' };
+
+    // Use user's workDir if set, otherwise fall back to config default
+    const effectiveWorkDir = (userSettings.workDir && userSettings.workDir.trim())
+      ? userSettings.workDir
+      : this.config.workDir;
+
+    log.debug(`[${toolName}] executing with session ID: ${sessionId || 'none'}`);
+
     const result = await adapter.execute(prompt, {
-      settings: this.sessions.get(uid), workDir: this.config.workDir, timeout: this.config.cliTimeout, extraArgs, signal,
+      settings: userSettings,
+      workDir: effectiveWorkDir,
+      timeout: this.config.cliTimeout,
+      extraArgs,
+      signal,
       askUser: (req) => this.askUserViaWeChat(uid, toolName, req),
     });
 

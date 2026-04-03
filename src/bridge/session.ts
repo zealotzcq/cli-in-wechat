@@ -16,6 +16,8 @@ export class SessionManager {
       s = { ...DEFAULT_SETTINGS, sessionIds: {} };
       this.data.set(userId, s);
     }
+    // Return the stored object directly to ensure sessionIds is always up-to-date
+    // Callers should not modify the returned object directly - use update() instead
     return s;
   }
 
@@ -40,6 +42,17 @@ export class SessionManager {
       s.sessionIds = {};
     }
     this.save();
+  }
+
+  setCurrentProject(userId: string, projectDir: string): void {
+    const s = this.get(userId);
+    s.currentProject = projectDir;
+    this.save();
+  }
+
+  getCurrentProject(userId: string): string {
+    const s = this.get(userId);
+    return s.currentProject || '';
   }
 
   private filePath(): string {

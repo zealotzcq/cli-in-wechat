@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { log } from '../utils/logger.js';
+import { log, isDebugMode } from '../utils/logger.js';
 
 /**
  * Encode a path to Claude's project directory naming scheme:
@@ -1165,13 +1165,15 @@ export class Router {
     const message = formatQuestionsForWeChat(req.questions, displayName);
 
     // 保存到调试文件
-    const fs = await import('node:fs');
-    const debugPath = process.cwd() + '/debug_wechat_message.txt';
-    try {
-      fs.writeFileSync(debugPath, `=== 发送给微信的消息 ===\n\n原始 JSON:\n${JSON.stringify(req, null, 2)}\n\n格式化消息:\n${message}\n`, 'utf-8');
-      log.info(`[router] 已保存微信消息到: ${debugPath}`);
-    } catch (e) {
-      log.info(`[router] 保存调试文件失败: ${(e as Error).message}`);
+    if (isDebugMode()) {
+      const fs = await import('node:fs');
+      const debugPath = process.cwd() + '/debug_wechat_message.txt';
+      try {
+        fs.writeFileSync(debugPath, `=== 发送给微信的消息 ===\n\n原始 JSON:\n${JSON.stringify(req, null, 2)}\n\n格式化消息:\n${message}\n`, 'utf-8');
+        log.debug(`[router] 已保存微信消息到: ${debugPath}`);
+      } catch (e) {
+        log.debug(`[router] 保存调试文件失败: ${(e as Error).message}`);
+      }
     }
 
     await this.ilink.sendText(uid, message);

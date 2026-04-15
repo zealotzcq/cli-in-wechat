@@ -5,6 +5,10 @@ export enum LogLevel {
   ERROR = 3,
 }
 
+export function isDebugMode(): boolean {
+  return currentLevel <= LogLevel.DEBUG;
+}
+
 let currentLevel = LogLevel.INFO;
 
 export function setLogLevel(level: LogLevel): void {

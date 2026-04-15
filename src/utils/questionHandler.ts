@@ -53,9 +53,9 @@ export function detectAskUserQuestion(output: string, cliResult: any): PendingQu
         const contentArray = Array.isArray(content) ? content : [content];
         for (const item of contentArray) {
           if (item.type === 'tool_use' && item.name === 'AskUserQuestion') {
-            log.info(`[question] 在 stream-json 的 assistant 消息中检测到 AskUserQuestion`);
-            log.info(`[question] tool_use 块: ${JSON.stringify(item).substring(0, 200)}`);
-            log.info(`[question] assistant message UUID: ${assistantUuid}`);
+            log.debug(`[question] 在 stream-json 的 assistant 消息中检测到 AskUserQuestion`);
+            log.debug(`[question] tool_use 块: ${JSON.stringify(item).substring(0, 200)}`);
+            log.debug(`[question] assistant message UUID: ${assistantUuid}`);
             return {
               toolUseId: item.id || '',
               parentMessageUuid: assistantUuid,
@@ -72,8 +72,8 @@ export function detectAskUserQuestion(output: string, cliResult: any): PendingQu
       if (obj.permission_denials) {
         for (const denial of obj.permission_denials) {
           if (denial.tool_name === 'AskUserQuestion') {
-            log.info(`[question] 在 permission_denials 中检测到 AskUserQuestion`);
-            log.info(`[question] tool_use 块: ${JSON.stringify(denial).substring(0, 200)}`);
+            log.debug(`[question] 在 permission_denials 中检测到 AskUserQuestion`);
+            log.debug(`[question] tool_use 块: ${JSON.stringify(denial).substring(0, 200)}`);
             return {
               toolUseId: denial.tool_use_id || '',
               parentMessageUuid: '',
@@ -97,8 +97,8 @@ export function detectAskUserQuestion(output: string, cliResult: any): PendingQu
       // 尝试提取完整的 tool_use 块
       const toolUse = extractToolUseBlock(output, toolUseMatch.index);
       if (toolUse) {
-        log.info(`[question] 解析到 tool_use 块: ${JSON.stringify(toolUse)}`);
-        log.info(`[question] 完整输出长度: ${output.length} 字符`);
+        log.debug(`[question] 解析到 tool_use 块: ${JSON.stringify(toolUse)}`);
+        log.debug(`[question] 完整输出长度: ${output.length} 字符`);
         return {
           toolUseId: toolUse.id,
           parentMessageUuid: '',
@@ -110,14 +110,14 @@ export function detectAskUserQuestion(output: string, cliResult: any): PendingQu
       }
     } catch (err) {
       // 解析失败，输出日志调试
-      log.info(`[question] 解析 tool_use 失败: ${(err as Error).message}`);
-      log.info(`[question] 输出片段: ${output.substring(toolUseMatch.index, toolUseMatch.index + 500)}`);
+      log.debug(`[question] 解析 tool_use 失败: ${(err as Error).message}`);
+      log.debug(`[question] 输出片段: ${output.substring(toolUseMatch.index, toolUseMatch.index + 500)}`);
     }
   }
 
-  log.info(`[question] 未能检测到 AskUserQuestion，输出长度: ${output.length}`);
+  log.debug(`[question] 未能检测到 AskUserQuestion，输出长度: ${output.length}`);
   // 只输出前500字符避免日志过大
-  log.info(`[question] 输出预览: ${output.substring(0, 500)}`);
+  log.debug(`[question] 输出预览: ${output.substring(0, 500)}`);
   return null;
 }
 
@@ -129,7 +129,7 @@ function extractToolUseBlock(output: string, startIndex: number): ToolUseBlock |
   const start = output.lastIndexOf('"type": "tool_use"', startIndex);
   if (start === -1) return null;
 
-  log.info(`[question] 开始位置: ${start}`);
+  log.debug(`[question] 开始位置: ${start}`);
 
   // 找到匹配的结束括号
   let braceCount = 0;
@@ -175,19 +175,19 @@ function extractToolUseBlock(output: string, startIndex: number): ToolUseBlock |
     const fullBlock = '{' + blockStr;
     const parsed = JSON.parse(fullBlock);
 
-    log.info(`[question] 解析结果: ${JSON.stringify(parsed, null, 2)}`);
+    log.debug(`[question] 解析结果: ${JSON.stringify(parsed, null, 2)}`);
 
     if (parsed.name === 'AskUserQuestion' && parsed.input?.questions) {
       // 输出每个选项
       if (parsed.input.questions) {
         for (const q of parsed.input.questions) {
           if (q.options) {
-            log.info(`[question] 问题: ${q.question}`);
+            log.debug(`[question] 问题: ${q.question}`);
             for (let i = 0; i < q.options.length; i++) {
               const opt = q.options[i];
-              log.info(`[question]   选项${i + 1}: label="${opt.label}"`);
+              log.debug(`[question]   选项${i + 1}: label="${opt.label}"`);
             }
-            log.info(`[question]   自动添加自定义选项: index=${q.options.length + 1}`);
+            log.debug(`[question]   自动添加自定义选项: index=${q.options.length + 1}`);
           }
         }
       }
@@ -199,7 +199,7 @@ function extractToolUseBlock(output: string, startIndex: number): ToolUseBlock |
       };
     }
   } catch {
-    log.info(`[question] JSON 解析失败: ${output.substring(start, Math.min(start + 500, output.length))}...`);
+    log.debug(`[question] JSON 解析失败: ${output.substring(start, Math.min(start + 500, output.length))}...`);
     return null;
   }
 
@@ -264,11 +264,6 @@ export function formatQuestionsForWeChat(
       const multiNote = q.multiSelect ? '（可多选，用逗号分隔如 1,3）' : '（单选）';
       lines.push(`  第${i + 1}题${multiNote}: ${normalOpts} 或 ${customIdx}:自定义内容`);
     }
-    lines.push('样例：');
-    lines.push('  1');
-    lines.push('  2,3');
-    lines.push('  4:我喜欢紫色');
-    lines.push('━━━━━━━━━━━━━━━━━━━━━━');
   } else {
     const q = questions[0];
     const customOptionIndex = q.options.length;
@@ -551,10 +546,10 @@ export function appendToSession(
   } else {
     // Keep everything up to and including the assistant message, discard the rest
     const keptLines = allLines.slice(0, truncateIndex + 1);
-    log.info(`[question] 截断 session 文件: 保留 ${keptLines.length}/${allLines.length} 行 (到 assistant message ${parentMessageUuid})`);
+    log.debug(`[question] 截断 session 文件: 保留 ${keptLines.length}/${allLines.length} 行 (到 assistant message ${parentMessageUuid})`);
     writeFileSync(sessionPath, keptLines.join('\n') + '\n', 'utf-8');
   }
 
   appendFileSync(sessionPath, message + '\n');
-  log.info(`[question] 已追加 tool_result 到 session 文件`);
+  log.debug(`[question] 已追加 tool_result 到 session 文件`);
 }

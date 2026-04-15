@@ -1,4 +1,5 @@
-import { log } from '../utils/logger.js';
+import { log, isDebugMode } from '../utils/logger.js';
+import { writeFileSync } from 'node:fs';
 import type { CLIAdapter, ExecOptions, ExecResult, AdapterCapabilities } from './base.js';
 import { commandExists, spawnProc, setupAbort, setupTimeout, isSessionError } from './base.js';
 import {
@@ -12,7 +13,6 @@ import {
   appendToSession,
 } from '../utils/questionHandler.js';
 import type { PendingQuestionInfo } from './base.js';
-import { writeFileSync } from 'node:fs';
 
 export class CcbAdapter implements CLIAdapter {
   readonly name = 'ccb';
@@ -39,8 +39,8 @@ export class CcbAdapter implements CLIAdapter {
       const pending = detectAskUserQuestion(result.streamOutput || result.text || '', result);
 
       if (pending) {
-        log.info(`[ccb] 检测到 AskUserQuestion: ${pending.toolUseId}`);
-        log.info(`[ccb] 调用 askUser 回调...`);
+        log.debug(`[ccb] 检测到 AskUserQuestion: ${pending.toolUseId}`);
+        log.debug(`[ccb] 调用 askUser 回调...`);
         // 使用 askUser 回调处理问题
         const answers = await opts.askUser({
           questions: pending.questions as Array<{
@@ -49,7 +49,7 @@ export class CcbAdapter implements CLIAdapter {
             multiSelect?: boolean;
           }>
         });
-        log.info(`[ccb] 收到用户回答: ${JSON.stringify(answers)}`);
+        log.debug(`[ccb] 收到用户回答: ${JSON.stringify(answers)}`);
 
         // 从 session 文件提取 promptId 等元数据
         const sid = pending.sessionId || result.sessionId || '';
@@ -69,23 +69,25 @@ export class CcbAdapter implements CLIAdapter {
           promptId: meta?.promptId || '',
         });
 
-        log.info(`[ccb] tool_result content: ${toolResultContent.substring(0, 200)}`);
-        log.info(`[ccb] parentMessageUuid: ${pending.parentMessageUuid}`);
-        log.info(`[ccb] promptId: ${meta?.promptId || '(empty)'}`);
+        log.debug(`[ccb] tool_result content: ${toolResultContent.substring(0, 200)}`);
+        log.debug(`[ccb] parentMessageUuid: ${pending.parentMessageUuid}`);
+        log.debug(`[ccb] promptId: ${meta?.promptId || '(empty)'}`);
 
         // 保存到调试文件
-        try {
-          writeFileSync(process.cwd() + '/debug_session_message.json', JSON.stringify(JSON.parse(sessionMessage), null, 2), 'utf-8');
-          log.info(`[ccb] 已保存 session 消息到 debug_session_message.json`);
-        } catch (e) {
-          log.info(`[ccb] 保存调试文件失败: ${(e as Error).message}`);
+        if (isDebugMode()) {
+          try {
+            writeFileSync(process.cwd() + '/debug_session_message.json', JSON.stringify(JSON.parse(sessionMessage), null, 2), 'utf-8');
+            log.debug(`[ccb] 已保存 session 消息到 debug_session_message.json`);
+          } catch (e) {
+            log.debug(`[ccb] 保存调试文件失败: ${(e as Error).message}`);
+          }
         }
 
         // 追加到 session 文件（会截断 error tool_result 并追加正确结果）
         appendToSession(sid, wdir, pending.parentMessageUuid, sessionMessage);
 
         // Resume session with a non-empty prompt (empty string gets ignored by CCB)
-        log.info(`[ccb] resume session: ${pending.sessionId || result.sessionId}`);
+        log.debug(`[ccb] resume session: ${pending.sessionId || result.sessionId}`);
         result = await this.executeWithCLI('继续', {
           ...opts,
           settings: {
@@ -107,7 +109,7 @@ export class CcbAdapter implements CLIAdapter {
   private executeWithCLI(prompt: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
       const { settings } = opts;
-      const args = ['-p', prompt, '--output-format', 'stream-json'];
+      const args = ['-p', prompt, '--output-format', 'stream-json', '--dangerously-skip-permissions'];
 
       switch (settings.mode) {
         case 'auto':
@@ -160,15 +162,15 @@ export class CcbAdapter implements CLIAdapter {
             const obj = JSON.parse(line);
             // Log all event types for debugging
             if (obj.type && !['message_start', 'message_delta', 'message_stop'].includes(obj.type)) {
-              log.info(`[ccb] 事件: ${obj.type}`);
+              log.debug(`[ccb] 事件: ${obj.type}`);
             }
             // Log all content_block_start events for debugging
             if (obj.type === 'content_block_start') {
-              log.info(`[ccb] content_block_start: ${JSON.stringify(obj.content_block || {}).substring(0, 150)}`);
+              log.debug(`[ccb] content_block_start: ${JSON.stringify(obj.content_block || {}).substring(0, 150)}`);
             }
             // Log for debugging
             if (obj.type === 'content_block_start' && obj.content_block?.type === 'tool_use') {
-              log.info(`[ccb] 检测到 tool_use: ${obj.content_block.name}`);
+              log.debug(`[ccb] 检测到 tool_use: ${obj.content_block.name}`);
             }
             // Capture session_id and final result
             if (obj.session_id) sessionId = obj.session_id;
@@ -178,7 +180,7 @@ export class CcbAdapter implements CLIAdapter {
           } catch (e) {
             // Log JSON parse errors
             if (line.length > 0 && line.length < 200) {
-              log.info(`[ccb] JSON解析失败: ${line.substring(0, 100)}`);
+              log.debug(`[ccb] JSON解析失败: ${line.substring(0, 100)}`);
             }
           }
         }
@@ -190,12 +192,14 @@ export class CcbAdapter implements CLIAdapter {
         if (opts.signal?.aborted) { resolve({ text: '已取消', error: true }); return; }
 
         // Save full stream output to debug file
-        const debugPath = process.cwd() + '/debug_stream.jsonl';
-        try {
-          writeFileSync(debugPath, streamOutput, 'utf-8');
-          log.info(`[ccb] 已保存完整流输出到: ${debugPath}, 大小: ${streamOutput.length} 字节`);
-        } catch (e) {
-          log.info(`[ccb] 保存调试文件失败: ${(e as Error).message}`);
+        if (isDebugMode()) {
+          const debugPath = process.cwd() + '/debug_stream.jsonl';
+          try {
+            writeFileSync(debugPath, streamOutput, 'utf-8');
+            log.debug(`[ccb] 已保存完整流输出到: ${debugPath}, 大小: ${streamOutput.length} 字节`);
+          } catch (e) {
+            log.debug(`[ccb] 保存调试文件失败: ${(e as Error).message}`);
+          }
         }
 
         // Parse stream-json to extract final text result
@@ -230,7 +234,7 @@ export class CcbAdapter implements CLIAdapter {
           }
         }
 
-        log.info(`[ccb] stream-json 解析完成: sessionId=${sessionId}, text长度=${finalText.length}, isError=${isError}`);
+        log.debug(`[ccb] stream-json 解析完成: sessionId=${sessionId}, text长度=${finalText.length}, isError=${isError}`);
 
         if (!finalText) {
           // Fallback to raw output if parsing failed

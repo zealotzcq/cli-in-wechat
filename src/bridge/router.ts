@@ -295,7 +295,8 @@ export class Router {
           '..km       切换到 Kimi',
           '..oc       切换到 OpenCode',
           '..pj / ..project  列出/选择工程',
-          '..re / ..resume   列出/恢复会话',
+          '..re / ..resume   列出/恢复近期会话',
+          '..rea / ..resumeall  列出全部会话',
           '..new      新建会话',
           '..info     查看当前状态',
           '..help     显示帮助',
@@ -309,6 +310,7 @@ export class Router {
           'CCB 自动管理会话连续性，',
           '用 ..resume 查看所有历史会话',
           '用 ..project 选择工程',
+          '..history [N]  查看最近N次交互(默认5,仅CCB)',
         ].join('\n'));
         return true;
 
@@ -835,6 +837,19 @@ export class Router {
             this.sessions.update(uid, { defaultTool: tool });
             log.debug(`[${tool}] resume: session=${pick.id}, workDir=${workDir}`);
             await reply(`已恢复 ${tool} 会话:\n${pick.summary}\n\nID: ${pick.id}\n工作目录: ${workDir}`);
+            if (tool === 'ccb') {
+              const history = this.getSessionHistory(pick.id, workDir, 2);
+              if (history && history.length > 0) {
+                const hLines = ['=== 最近 ' + history.length + ' 次交互 ===', ''];
+                for (const item of history) {
+                  const label = item.role === 'user' ? '👤 用户' : '🤖 助手';
+                  hLines.push(`${label}:`);
+                  hLines.push(item.text);
+                  hLines.push('');
+                }
+                await reply(hLines.join('\n'));
+              }
+            }
           } else {
             // Treat as UUID - validate UUID format
             const sessionId = arg.trim();
@@ -852,12 +867,26 @@ export class Router {
             this.sessions.update(uid, { defaultTool: tool });
             log.debug(`[${tool}] resume: session=${sessionId} (direct UUID)`);
             await reply(`${tool} session → ${sessionId}`);
+            if (tool === 'ccb') {
+              const uuidWorkDir = currentProject !== 'all' ? decodeProjectName(currentProject) : (settings.workDir || this.config.workDir);
+              const history = this.getSessionHistory(sessionId, uuidWorkDir, 2);
+              if (history && history.length > 0) {
+                const hLines = ['=== 最近 ' + history.length + ' 次交互 ===', ''];
+                for (const item of history) {
+                  const label = item.role === 'user' ? '👤 用户' : '🤖 助手';
+                  hLines.push(`${label}:`);
+                  hLines.push(item.text);
+                  hLines.push('');
+                }
+                await reply(hLines.join('\n'));
+              }
+            }
           }
           return true;
         }
         // List all sessions for current tool and project
         const workDir = currentProject === 'all' ? (settings.workDir || this.config.workDir) : decodeProjectName(currentProject);
-        const list = this.listSessions(tool, workDir, currentProject === 'all' ? undefined : currentProject);
+        const list = this.listSessions(tool, workDir, currentProject === 'all' ? undefined : currentProject, true);
         if (list.length === 0) {
           if (currentProject === 'all') {
             await reply(`${tool} 没有历史会话`);
@@ -877,6 +906,91 @@ export class Router {
 
         const projectInfo = currentProject === 'all' ? '所有工程' : currentProject;
         await reply(`${tool} 历史会话 (${projectInfo}, 最近${list.length}条):\n\n${lines.join('\n\n')}\n\n回复 ..resume <编号> 恢复`);
+        return true;
+      }
+
+      case 'resumeall': case 'rea': {
+        const currentProject = this.sessions.getCurrentProject(uid);
+        if (!currentProject) {
+          await reply('请先选择工程：\n..project 查看工程列表\n..project <编号> 选择工程');
+          return true;
+        }
+        if (arg) {
+          const num = parseInt(arg);
+          if (!isNaN(num) && this._lastSessionList) {
+            if (num < 1 || num > this._lastSessionList.length) {
+              await reply(`无效编号，范围 1-${this._lastSessionList.length}`);
+              return true;
+            }
+            const pick = this._lastSessionList[num - 1];
+            const workDir = currentProject === 'all' ? (settings.workDir || this.config.workDir) : decodeProjectName(currentProject);
+            if (currentProject !== 'all') {
+              this.sessions.update(uid, { workDir });
+            }
+            this.sessions.setSession(uid, tool, pick.id);
+            this.sessions.update(uid, { defaultTool: tool });
+            log.debug(`[${tool}] resumeall: session=${pick.id}, workDir=${workDir}`);
+            await reply(`已恢复 ${tool} 会话:\n${pick.summary}\n\nID: ${pick.id}\n工作目录: ${workDir}`);
+            if (tool === 'ccb') {
+              const history = this.getSessionHistory(pick.id, workDir, 2);
+              if (history && history.length > 0) {
+                const hLines = ['=== 最近 ' + history.length + ' 次交互 ===', ''];
+                for (const item of history) {
+                  const label = item.role === 'user' ? '👤 用户' : '🤖 助手';
+                  hLines.push(`${label}:`);
+                  hLines.push(item.text);
+                  hLines.push('');
+                }
+                await reply(hLines.join('\n'));
+              }
+            }
+          } else {
+            const sessionId = arg.trim();
+            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (!uuidRegex.test(sessionId)) {
+              await reply(`无效的 UUID 格式\n请使用完整 UUID 或先列出会话后使用编号: ..resumeall`);
+              return true;
+            }
+            if (currentProject !== 'all') {
+              const workDir = decodeProjectName(currentProject);
+              this.sessions.update(uid, { workDir });
+            }
+            this.sessions.setSession(uid, tool, sessionId);
+            this.sessions.update(uid, { defaultTool: tool });
+            log.debug(`[${tool}] resumeall: session=${sessionId} (direct UUID)`);
+            await reply(`${tool} session → ${sessionId}`);
+            if (tool === 'ccb') {
+              const uuidWorkDir = currentProject !== 'all' ? decodeProjectName(currentProject) : (settings.workDir || this.config.workDir);
+              const history = this.getSessionHistory(sessionId, uuidWorkDir, 2);
+              if (history && history.length > 0) {
+                const hLines = ['=== 最近 ' + history.length + ' 次交互 ===', ''];
+                for (const item of history) {
+                  const label = item.role === 'user' ? '👤 用户' : '🤖 助手';
+                  hLines.push(`${label}:`);
+                  hLines.push(item.text);
+                  hLines.push('');
+                }
+                await reply(hLines.join('\n'));
+              }
+            }
+          }
+          return true;
+        }
+        const workDir = currentProject === 'all' ? (settings.workDir || this.config.workDir) : decodeProjectName(currentProject);
+        const list = this.listSessions(tool, workDir, currentProject === 'all' ? undefined : currentProject, false);
+        if (list.length === 0) {
+          await reply(`${tool} 没有历史会话`);
+          return true;
+        }
+        this._lastSessionList = list;
+        const currentSessionId = settings.sessionIds[tool] || '';
+        const lines = list.map((s, i) => {
+          const isCurrent = s.id === currentSessionId || s.id.startsWith(currentSessionId.substring(0, 8));
+          const marker = isCurrent ? ' [当前]' : '';
+          return `${i + 1}. ${s.date} ${s.summary}${marker}\n   ${s.id}`;
+        });
+        const projectInfo = currentProject === 'all' ? '所有工程' : currentProject;
+        await reply(`${tool} 全部会话 (${projectInfo}, 共${list.length}条):\n\n${lines.join('\n\n')}\n\n回复 ..resumeall <编号> 恢复`);
         return true;
       }
 
@@ -903,6 +1017,38 @@ export class Router {
       // 工具切换
       // ═══════════════════════════════════════════
 
+      case 'history': {
+        if (tool !== 'ccb') {
+          await reply('..history 仅支持 CCB 通道');
+          return true;
+        }
+        const count = parseInt(arg) || 5;
+        const sid = settings.sessionIds.ccb;
+        if (!sid) {
+          await reply('当前没有 CCB 会话，请先发送消息创建会话');
+          return true;
+        }
+        const wdir = settings.workDir || this.config.workDir;
+        const history = this.getSessionHistory(sid, wdir, count);
+        if (!history) {
+          await reply('会话文件不存在或无法读取');
+          return true;
+        }
+        if (history.length === 0) {
+          await reply('会话中没有交互记录');
+          return true;
+        }
+        const lines = ['=== 最近 ' + history.length + ' 次交互 ===', ''];
+        for (const item of history) {
+          const label = item.role === 'user' ? '👤 用户' : '🤖 助手';
+          lines.push(`${label}:`);
+          lines.push(item.text);
+          lines.push('');
+        }
+        await reply(lines.join('\n'));
+        return true;
+      }
+
       case 'ccb':
         this.sessions.update(uid, { defaultTool: 'ccb' }); await reply('→ ccb'); return true;
       case 'claude': case 'cc':
@@ -928,7 +1074,7 @@ export class Router {
 
   // ─── List historical sessions ───────────────────────────
 
-  private listSessions(tool: string, workDir: string, currentProject?: string): Array<{ id: string; date: string; summary: string }> {
+  private listSessions(tool: string, workDir: string, currentProject?: string, recentOnly?: boolean): Array<{ id: string; date: string; summary: string }> {
     try {
       // Claude: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
       // CCB: same as Claude (compatible)
@@ -1003,10 +1149,19 @@ export class Router {
         results.push(...files);
       }
 
-      return results
-        .sort((a, b) => b.mtime - a.mtime)
-        .slice(0, 30)
-        .map(({ id, date, summary }) => ({ id, date, summary }));
+      const sorted = results.sort((a, b) => b.mtime - a.mtime);
+
+      if (recentOnly) {
+        const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+        const recent = sorted.filter(s => s.mtime >= threeDaysAgo);
+        if (recent.length >= 5) {
+          return recent.slice(0, 30).map(({ id, date, summary }) => ({ id, date, summary }));
+        }
+        const older = sorted.filter(s => s.mtime < threeDaysAgo);
+        return [...recent, ...older].slice(0, 30).map(({ id, date, summary }) => ({ id, date, summary }));
+      }
+
+      return sorted.slice(0, 30).map(({ id, date, summary }) => ({ id, date, summary }));
     } catch {
       return [];
     }
@@ -1041,6 +1196,54 @@ export class Router {
       return results.sort((a, b) => b.mtime - a.mtime).slice(0, 10).map(({ id, date, summary }) => ({ id, date, summary }));
     } catch {
       return [];
+    }
+  }
+
+  // ─── Get session interaction history ──────────────────
+
+  private getSessionHistory(sessionId: string, workDir: string, maxCount: number): Array<{ role: string; text: string }> | null {
+    try {
+      const encodedCwd = workDir.replace(/:[\/\\]/g, '--').replace(/[\/\\]/g, '-');
+      const sessionPath = join(homedir(), '.claude', 'projects', encodedCwd, `${sessionId}.jsonl`);
+
+      if (!existsSync(sessionPath)) return null;
+
+      const allLines = readFileSync(sessionPath, 'utf-8').split('\n');
+      const result: Array<{ role: string; text: string }> = [];
+
+      for (let i = allLines.length - 1; i >= 0 && result.length < maxCount; i--) {
+        const line = allLines[i];
+        if (!line.trim()) continue;
+        let obj: any;
+        try { obj = JSON.parse(line); } catch { continue; }
+
+        if (obj.type === 'system') return result;
+
+        if ((obj.type === 'user' || obj.type === 'assistant') && obj.message?.content) {
+          const content = obj.message.content;
+          if (Array.isArray(content)) {
+            const textParts: string[] = [];
+            for (const block of content) {
+              if (block.type === 'text' && block.text) {
+                textParts.push(block.text);
+              }
+            }
+            const text = textParts.join('').trim();
+            if (textParts.length > 0) {
+              if (text.startsWith('<local-command') || text.startsWith('<command-name') || text.startsWith('/')) continue;
+              result.unshift({ role: obj.type === 'user' ? 'user' : 'assistant', text });
+            }
+          } else if (typeof content === 'string' && content.trim()) {
+            const text = content.trim();
+            if (text.startsWith('<local-command') || text.startsWith('<command-name') || text.startsWith('/')) continue;
+            result.unshift({ role: obj.type === 'user' ? 'user' : 'assistant', text });
+          }
+        }
+      }
+
+      return result;
+    } catch {
+      return null;
     }
   }
 

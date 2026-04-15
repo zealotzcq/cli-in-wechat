@@ -133,7 +133,8 @@ export const WIN = process.platform === 'win32';
 export function spawnProc(cmd: string, args: string[], opts: import('node:child_process').SpawnOptions): ChildProcess {
   log.debug(`[spawn] ${cmd} ${args.map(a => JSON.stringify(a)).join(' ')}`);
   if (!WIN) return spawn(cmd, args, opts);
-  return spawn(cmd, args, { ...opts, shell: true });
+  const fullCmd = [cmd, ...args].map(a => a.includes(' ') || a.includes('"') ? `"${a.replace(/"/g, '\\"')}"` : a).join(' ');
+  return spawn(fullCmd, [], { ...opts, shell: true });
 }
 
 export function commandExists(cmd: string): Promise<boolean> {

@@ -8,6 +8,7 @@ import {
   loadConfig,
   loadCredentials,
   saveCredentials,
+  clearCredentials,
   ensureDataDir,
 } from './config.js';
 import { log, setLogLevel, LogLevel } from './utils/logger.js';
@@ -60,9 +61,15 @@ async function main() {
   // ─── 3. WeChat login ─────────────────────────────────
 
   let credentials = loadCredentials();
+  const forceNew = process.argv.includes('--new');
 
-  if (!credentials) {
-    log.info('需要登录微信 ClawBot...');
+  if (!credentials || forceNew) {
+    if (forceNew && credentials) {
+      clearCredentials();
+      log.info('已清除旧凭据，重新登录...');
+    } else {
+      log.info('需要登录微信 ClawBot...');
+    }
 
     let qrGenerate: ((text: string, opts: { small: boolean }) => void) | null = null;
     try {

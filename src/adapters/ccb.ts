@@ -1,7 +1,7 @@
 import { log, isDebugMode } from '../utils/logger.js';
 import { writeFileSync } from 'node:fs';
 import type { CLIAdapter, ExecOptions, ExecResult, AdapterCapabilities } from './base.js';
-import { commandExists, spawnProc, setupAbort, setupTimeout, isSessionError } from './base.js';
+import { spawnProc, setupAbort, setupTimeout, isSessionError } from './base.js';
 import {
   detectAskUserQuestion,
   formatQuestionsForWeChat,
@@ -24,7 +24,11 @@ export class CcbAdapter implements CLIAdapter {
   };
 
   async isAvailable(): Promise<boolean> {
-    return commandExists(this.command);
+    return new Promise((resolve) => {
+      const proc = spawnProc(this.command, ['-V'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      proc.on('close', (code) => resolve(code === 0));
+      proc.on('error', () => resolve(false));
+    });
   }
 
   async execute(prompt: string, opts: ExecOptions): Promise<ExecResult> {

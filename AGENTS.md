@@ -2,6 +2,9 @@
 
 本文件为在此仓库中工作的 AI 编码代理提供指导。
 
+## 仓库功能
+本仓库代码的主要功能是作为微信消息聊天机器人，一端和微信连接，一段和本地cli工具连接，双向传输信息
+
 ## 构建、检查和测试命令
 
 ```bash
@@ -18,6 +21,11 @@ npm test                 # 运行所有测试
 node --test test/*.test.ts  # 显式运行所有测试
 node --test test/router.test.ts  # 运行单个测试文件
 ```
+
+## 日志和状态
+开发者会使用如下命令启动开发服务：
+npm run dev 2>1 | tee ./debug.log
+所以智能体应该自己读取这个日志文件(当前工程目录下)来获得运行时信息，并在需要时增加日志
 
 ## 代码风格指南
 
@@ -89,6 +97,11 @@ node --test test/router.test.ts  # 运行单个测试文件
 - 使用最小化接口模拟依赖项
 - 测试状态变更而非内部细节
 - 验证消息路由逻辑和会话持久性
+
+## CCB 会话处理
+- CCB是一个和claude code完全兼容，公用session数据的工具，但没有对应的agent sdk
+- 对于ccb通道的功能，可以采用和cc通道同样的数据结构进行处理
+- ccb的源代码位置在 /g/platform/src/github/claude-code-best， 可以在git bash环境下，先cd到这个路径，然后使用bash ./ccb_build.sh来编译并更新本地的ccb命令
 
 ## OpenCode 会话处理
 

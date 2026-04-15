@@ -69,9 +69,16 @@ export const DEFAULT_SETTINGS: UserSettings = {
 export interface AskUserRequest {
   questions: Array<{
     question: string;
-    options: Array<{ label: string; description?: string }>;
+    options: Array<{ label: string; description?: string; custom?: boolean }>;
     multiSelect?: boolean;
   }>;
+}
+
+export interface PendingQuestionInfo {
+  toolUseId: string;
+  questions: AskUserRequest['questions'];
+  sessionId: string;
+  workDir: string;
 }
 
 export interface ExecOptions {
@@ -81,10 +88,14 @@ export interface ExecOptions {
   extraArgs?: string[];
   signal?: AbortSignal;
   askUser?: (req: AskUserRequest) => Promise<Record<string, string>>;
+  /** Callback for CLI mode AskUserQuestion - returns pending question info */
+  onPendingQuestion?: (info: PendingQuestionInfo) => Promise<Record<string, string>>;
 }
 
 export interface ExecResult {
   text: string;
+  /** Raw stream output for tool_use detection (e.g., AskUserQuestion) */
+  streamOutput?: string;
   sessionId?: string;
   cost?: number;
   duration?: number;

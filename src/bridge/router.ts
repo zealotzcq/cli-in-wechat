@@ -1139,6 +1139,7 @@ export class Router {
       extraArgs,
       signal,
       askUser: (req) => this.askUserViaWeChat(uid, toolName, req),
+      onPendingQuestion: (info) => this.handlePendingQuestion(uid, toolName, info),
     });
 
     if (result.sessionExpired && hadSession && !signal.aborted) {
@@ -1154,24 +1155,28 @@ export class Router {
   // ─── AskUserQuestion via WeChat ─────────────────────────
 
   private async askUserViaWeChat(uid: string, toolName: string, req: AskUserRequest): Promise<Record<string, string>> {
+    const { formatQuestionsForWeChat, parseUserAnswer, answersToToolResult } =
+      await import('../utils/questionHandler.js');
+
     const adapter = this.registry.get(toolName);
     const displayName = adapter?.displayName ?? toolName;
 
-    // Format questions for WeChat display
-    const lines: string[] = [`${displayName} 需要你的回答:`];
-    for (const q of req.questions) {
-      lines.push('');
-      lines.push(`❓ ${q.question}`);
-      q.options.forEach((opt, i) => {
-        lines.push(`  ${i + 1}. ${opt.label}${opt.description ? ` — ${opt.description}` : ''}`);
-      });
-      if (q.multiSelect) lines.push('  (可多选，用逗号分隔数字)');
+    // Format questions for WeChat display (使用统一的格式化函数)
+    const message = formatQuestionsForWeChat(req.questions, displayName);
+
+    // 保存到调试文件
+    const fs = await import('node:fs');
+    const debugPath = process.cwd() + '/debug_wechat_message.txt';
+    try {
+      fs.writeFileSync(debugPath, `=== 发送给微信的消息 ===\n\n原始 JSON:\n${JSON.stringify(req, null, 2)}\n\n格式化消息:\n${message}\n`, 'utf-8');
+      log.info(`[router] 已保存微信消息到: ${debugPath}`);
+    } catch (e) {
+      log.info(`[router] 保存调试文件失败: ${(e as Error).message}`);
     }
-    lines.push(`— ${displayName} | 等待回复`);
 
-    await this.ilink.sendText(uid, lines.join('\n'));
+    await this.ilink.sendText(uid, message);
 
-    // Wait for user reply (timeout 5 min); key: "${uid}:${toolName}" for concurrent support
+    // Wait for user reply (timeout 5 min)
     const pendingKey = `${uid}:${toolName}`;
     const reply = await new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -1181,27 +1186,53 @@ export class Router {
       this.pendingQuestions.set(pendingKey, { resolve, timeout, toolName });
     });
 
-    // Parse reply → map to question answers
-    const answers: Record<string, string> = {};
-    const replyParts = reply.split(/[,，]/);
+    // Parse user answer (使用统一的解析函数)
+    const parsed = parseUserAnswer(reply, req.questions.length, req.questions);
 
-    for (let i = 0; i < req.questions.length; i++) {
-      const q = req.questions[i];
-      const userInput = (replyParts[i] || reply).trim();
+    // Convert to answers format
+    const answers = answersToToolResult(parsed, req.questions);
+    const answersObj = JSON.parse(answers).input_json.answers as Record<string, string>;
 
-      // Try to match by number
-      const num = parseInt(userInput);
-      if (num >= 1 && num <= q.options.length) {
-        answers[q.question] = q.options[num - 1].label;
-      } else {
-        // Try to match by label
-        const match = q.options.find(o => o.label.toLowerCase() === userInput.toLowerCase());
-        answers[q.question] = match ? match.label : userInput;
-      }
-    }
+    log.debug(`[askUser] answers: ${JSON.stringify(answersObj)}`);
+    return answersObj;
+  }
 
-    log.debug(`[askUser] answers: ${JSON.stringify(answers)}`);
-    return answers;
+  // ─── Handle pending AskUserQuestion (CLI mode) ───────────────
+
+  private async handlePendingQuestion(
+    uid: string,
+    toolName: string,
+    info: import('../adapters/base.js').PendingQuestionInfo
+  ): Promise<Record<string, string>> {
+    const { formatQuestionsForWeChat, parseUserAnswer, answersToToolResult } =
+      await import('../utils/questionHandler.js');
+
+    const adapter = this.registry.get(toolName);
+    const displayName = adapter?.displayName ?? toolName;
+
+    // Format questions for WeChat display
+    const message = formatQuestionsForWeChat(info.questions, displayName);
+    await this.ilink.sendText(uid, message);
+
+    // Wait for user reply (timeout 5 min)
+    const pendingKey = `${uid}:${toolName}`;
+    const reply = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingQuestions.delete(pendingKey);
+        reject(new Error('回复超时'));
+      }, 300_000);
+      this.pendingQuestions.set(pendingKey, { resolve, timeout, toolName });
+    });
+
+    // Parse user answer
+    const parsed = parseUserAnswer(reply, info.questions.length, info.questions);
+
+    // Convert to answers format
+    const answers = answersToToolResult(parsed, info.questions);
+    const answersObj = JSON.parse(answers).input_json.answers as Record<string, string>;
+
+    log.debug(`[handlePendingQuestion] answers: ${JSON.stringify(answersObj)}`);
+    return answersObj;
   }
 
   private async exec(uid: string, toolName: string, prompt: string): Promise<void> {
